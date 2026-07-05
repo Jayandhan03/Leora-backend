@@ -16,10 +16,16 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.services.audio_service import generate_audio_stream
-from app.services.db_service import agents_collection, get_chat_id_for_email, preferences_collection
+from app.services.db_service import (
+    agents_collection,
+    get_chat_id_for_email,
+    get_wa_id_for_email,
+    preferences_collection,
+)
 from app.services.llm_service import summarize_news
 from app.services.news_service import fetch_news
-from app.services.telegram_service import send_audio_to_user
+from app.services.telegram_service import send_audio_to_user as send_telegram_audio
+from app.services.whatsapp_service import send_audio_to_user as send_whatsapp_audio
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +86,54 @@ def _drain_audio_stream(async_stream) -> bytes:
 
 # ── Delivery ─────────────────────────────────────────────────────
 
+def _send_to_linked_channels(
+    email: str,
+    chat_id: str | None,
+    wa_id: str | None,
+    audio_bytes: bytes,
+    filename: str,
+    caption: str,
+) -> dict:
+    """
+    Send the generated audio to every channel the user has linked. A channel
+    failing to send doesn't block the other — each is tried independently.
+    """
+    channels: dict = {}
+
+    if chat_id:
+        try:
+            send_telegram_audio(chat_id=chat_id, audio_bytes=audio_bytes, filename=filename, caption=caption)
+            channels["telegram"] = True
+        except Exception as exc:  # noqa: BLE001 — record and keep going
+            logger.error("Telegram delivery failed for %s: %s", email, exc)
+            channels["telegram"] = False
+
+    if wa_id:
+        try:
+            send_whatsapp_audio(wa_id=wa_id, audio_bytes=audio_bytes, filename=filename, caption=caption)
+            channels["whatsapp"] = True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("WhatsApp delivery failed for %s: %s", email, exc)
+            channels["whatsapp"] = False
+
+    return channels
+
+
 def deliver_for_user(pref: dict) -> dict:
     """
     Run the full pipeline for a single user's preferences and send the audio
-    to their Telegram chat. Raises on hard failures so the caller can record it.
+    to every chat platform they've linked. Raises on hard failures so the
+    caller can record it.
     """
     email = pref.get("email")
     if not email:
         return {"email": None, "delivered": False, "reason": "missing_email"}
 
     chat_id = get_chat_id_for_email(email)
-    if not chat_id:
-        logger.info("Skipping %s — no Telegram link.", email)
-        return {"email": email, "delivered": False, "reason": "no_telegram_link"}
+    wa_id = get_wa_id_for_email(email)
+    if not chat_id and not wa_id:
+        logger.info("Skipping %s — no delivery channel linked.", email)
+        return {"email": email, "delivered": False, "reason": "no_channel_linked"}
 
     query = _build_query(pref)
     label = _topic_label(pref)
@@ -115,31 +156,29 @@ def deliver_for_user(pref: dict) -> dict:
     filename = (label.replace(" ", "_").replace(",", "")[:40] or "news") + "_briefing.mp3"
     caption = f"🎙 Your scheduled briefing: {label}"
 
-    send_audio_to_user(
-        chat_id=chat_id,
-        audio_bytes=audio_bytes,
-        filename=filename,
-        caption=caption,
-    )
-    logger.info("Delivered scheduled briefing to %s (%d articles).", email, len(articles))
-    return {"email": email, "delivered": True, "articles": len(articles)}
+    channels = _send_to_linked_channels(email, chat_id, wa_id, audio_bytes, filename, caption)
+    delivered = any(channels.values())
+    logger.info("Delivered scheduled briefing to %s (%d articles) — channels=%s", email, len(articles), channels)
+    return {"email": email, "delivered": delivered, "articles": len(articles), "channels": channels}
 
 
 def deliver_for_agent(agent: dict) -> dict:
     """
     Run the full pipeline for a single per-user Agent document and send the
-    audio to its owner's Telegram chat. Mirrors deliver_for_user, but reads
-    the nested Agent shape (topics/keywords/region/articleLimit/personality)
-    instead of the flat legacy UserPreference shape.
+    audio to every chat platform its owner has linked. Mirrors
+    deliver_for_user, but reads the nested Agent shape
+    (topics/keywords/region/articleLimit/personality) instead of the flat
+    legacy UserPreference shape.
     """
     email = agent.get("email")
     if not email:
         return {"email": None, "delivered": False, "reason": "missing_email"}
 
     chat_id = get_chat_id_for_email(email)
-    if not chat_id:
-        logger.info("Skipping agent %s (%s) — no Telegram link.", agent.get("_id"), email)
-        return {"email": email, "delivered": False, "reason": "no_telegram_link"}
+    wa_id = get_wa_id_for_email(email)
+    if not chat_id and not wa_id:
+        logger.info("Skipping agent %s (%s) — no delivery channel linked.", agent.get("_id"), email)
+        return {"email": email, "delivered": False, "reason": "no_channel_linked"}
 
     query = _build_query(agent)
     label = _topic_label(agent) or agent.get("name") or "Your News"
@@ -164,14 +203,10 @@ def deliver_for_agent(agent: dict) -> dict:
     filename = (label.replace(" ", "_").replace(",", "")[:40] or "news") + "_briefing.mp3"
     caption = f"🎙 {agent.get('name', 'Agent')}: {label}"
 
-    send_audio_to_user(
-        chat_id=chat_id,
-        audio_bytes=audio_bytes,
-        filename=filename,
-        caption=caption,
-    )
-    logger.info("Delivered agent briefing to %s (%d articles).", email, len(articles))
-    return {"email": email, "delivered": True, "articles": len(articles)}
+    channels = _send_to_linked_channels(email, chat_id, wa_id, audio_bytes, filename, caption)
+    delivered = any(channels.values())
+    logger.info("Delivered agent briefing to %s (%d articles) — channels=%s", email, len(articles), channels)
+    return {"email": email, "delivered": delivered, "articles": len(articles), "channels": channels}
 
 
 # ── Scheduling ───────────────────────────────────────────────────

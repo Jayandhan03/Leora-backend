@@ -31,6 +31,10 @@ class Settings:
     # ---Telegram ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
+    # --- WhatsApp (via Kapso) ---
+    KAPSO_API_KEY: str = os.getenv("KAPSO_API_KEY", "")
+    KAPSO_PHONE_NUMBER_ID: str = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
+
     # --- Database (shared with the YourNews Next.js app) ---
     MONGODB_URI: str = os.getenv("MONGODB_URI", "")
     MONGODB_DB: str = os.getenv("MONGODB_DB", "yournews")

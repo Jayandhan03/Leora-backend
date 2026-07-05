@@ -50,6 +50,10 @@ def telegram_links_collection() -> Collection:
     return get_db()["telegramlinks"]
 
 
+def whatsapp_links_collection() -> Collection:
+    return get_db()["whatsapplinks"]
+
+
 def agents_collection() -> Collection:
     return get_db()["agents"]
 
@@ -58,6 +62,12 @@ def get_chat_id_for_email(email: str) -> str | None:
     """Look up the Telegram chat_id linked to a user's email, if any."""
     doc = telegram_links_collection().find_one({"email": email.lower()})
     return doc.get("chatId") if doc else None
+
+
+def get_wa_id_for_email(email: str) -> str | None:
+    """Look up the WhatsApp wa_id linked to a user's email, if any."""
+    doc = whatsapp_links_collection().find_one({"email": email.lower()})
+    return doc.get("waId") if doc else None
 
 
 def is_available() -> bool:

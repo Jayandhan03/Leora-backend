@@ -313,8 +313,8 @@ async def scheduler_deliver_now(data: DeliverNowRequest):
 
     if not result.get("delivered"):
         reason = result.get("reason", "unknown")
-        if reason == "no_telegram_link":
-            raise HTTPException(status_code=409, detail="Telegram is not linked for this user.")
+        if reason == "no_channel_linked":
+            raise HTTPException(status_code=409, detail="No delivery channel (Telegram/WhatsApp) is linked for this user.")
         raise HTTPException(status_code=500, detail=f"Delivery failed: {reason}")
 
     return result
@@ -371,8 +371,8 @@ async def agents_deliver_now(data: DeliverNowAgentRequest):
 
     if not result.get("delivered"):
         reason = result.get("reason", "unknown")
-        if reason == "no_telegram_link":
-            raise HTTPException(status_code=409, detail="Telegram is not linked for this user.")
+        if reason == "no_channel_linked":
+            raise HTTPException(status_code=409, detail="No delivery channel (Telegram/WhatsApp) is linked for this user.")
         raise HTTPException(status_code=500, detail=f"Delivery failed: {reason}")
 
     return result
