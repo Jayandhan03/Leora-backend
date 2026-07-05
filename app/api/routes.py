@@ -3,6 +3,7 @@ Unified API routes — single file defining all endpoints.
 All routes are prefixed with /api/v1 via the main router.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -304,7 +305,11 @@ async def scheduler_deliver_now(data: DeliverNowRequest):
         raise HTTPException(status_code=404, detail="No saved preferences for this user.")
 
     try:
-        result = deliver_for_user(pref)
+        # deliver_for_user is synchronous and drains an async TTS stream via
+        # asyncio.run() internally — that only works off the main event loop,
+        # so it must run in a worker thread when called from an async route
+        # (the background scheduler already runs it in its own thread).
+        result = await asyncio.to_thread(deliver_for_user, pref)
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
@@ -355,7 +360,9 @@ async def agents_deliver_now(data: DeliverNowAgentRequest):
         raise HTTPException(status_code=404, detail="Agent not found.")
 
     try:
-        result = deliver_for_agent(agent)
+        # See the note in scheduler_deliver_now — must run off the main
+        # event loop for the same asyncio.run() reason.
+        result = await asyncio.to_thread(deliver_for_agent, agent)
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
