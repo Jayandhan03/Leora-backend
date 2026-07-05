@@ -50,6 +50,10 @@ def telegram_links_collection() -> Collection:
     return get_db()["telegramlinks"]
 
 
+def agents_collection() -> Collection:
+    return get_db()["agents"]
+
+
 def get_chat_id_for_email(email: str) -> str | None:
     """Look up the Telegram chat_id linked to a user's email, if any."""
     doc = telegram_links_collection().find_one({"email": email.lower()})

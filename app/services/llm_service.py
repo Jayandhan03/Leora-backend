@@ -88,10 +88,10 @@ def run_agent(topic: str) -> str:
     return clean_text(final_text) if final_text else "No summary generated."
 
 
-def summarize_news(topic: str, articles: list[dict]) -> str:
+def summarize_news(topic: str, articles: list[dict], language: str = "English") -> str:
     """
     Build a broadcast-style news summary from raw article dicts
-    using the Grok LLM.
+    using the Grok LLM, written entirely in `language`.
     """
     llm = _require_llm()
 
@@ -118,21 +118,28 @@ def summarize_news(topic: str, articles: list[dict]) -> str:
         "engaging audio-ready news brief that is easy and pleasant to hear. "
         "Rules:\n"
         "  1. Open with a warm, one-sentence welcome that names the topic.\n"
-        "  2. Present each story in order of importance (most significant first). "
-        "     For each story:\n"
+        "  2. Present stories in order of importance (most significant first). "
+        "     For each story you cover:\n"
         "       a. State the headline clearly.\n"
-        "       b. Explain what happened in 2-3 concise sentences.\n"
-        "       c. Add one sentence on why it matters to the listener.\n"
-        "  3. Separate stories with a transition phrase (e.g., 'Moving on...', 'Next up...').\n"
+        "       b. Explain what happened in 1-2 concise sentences.\n"
+        "       c. Add one short clause on why it matters to the listener.\n"
+        "  3. Separate stories with a brief transition phrase (e.g., 'Moving on...', 'Next up...').\n"
         "  4. Close with a brief, upbeat sign-off (one sentence).\n"
-        "  5. Use plain, conversational English — no bullet points, no markdown.\n"
-        "  6. Do NOT invent facts; only use what is in the provided articles."
+        f"  5. Write the ENTIRE brief in {language} — every sentence, including the welcome "
+        f"and sign-off. Do not mix in any other language, even for proper nouns' surrounding "
+        f"text. Use plain, conversational {language} — no bullet points, no markdown.\n"
+        "  6. Do NOT invent facts; only use what is in the provided articles.\n"
+        "  7. LENGTH — this is spoken aloud, not read, and must never run past 3 minutes: "
+        "target 300-380 words total, and never exceed 420 words under any circumstance. "
+        "If the word budget isn't enough to cover every provided story, cover only the "
+        "most significant ones fully rather than skimming all of them thinly — a shorter, "
+        "well-told brief beats a rushed, complete one."
     )
 
     human_prompt = (
         f"Topic: {topic}\n\n"
         f"Here are today's articles:\n\n{raw_context}\n\n"
-        "Please produce the news summary now, following your anchor guidelines."
+        f"Please produce the news summary now, entirely in {language}, following your anchor guidelines."
     )
 
     messages = [

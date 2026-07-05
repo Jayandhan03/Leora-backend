@@ -27,6 +27,10 @@ class DeliverNowRequest(BaseModel):
     email: str = Field(..., min_length=3, description="User email whose briefing to send now")
 
 
+class DeliverNowAgentRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1, description="Mongo _id of the agent to deliver now")
+
+
 class SummarizeRequest(BaseModel):
     topic: str = Field(..., min_length=1, description="Search topic")
     limit: int = Field(default=5, ge=1, le=20, description="Number of articles to fetch")
@@ -34,17 +38,23 @@ class SummarizeRequest(BaseModel):
         default="anytime",
         description="Time filter: anytime | past_hour | past_day | past_week",
     )
+    language: str = Field(
+        default="English",
+        description="Human language label the summary should be written in, e.g. English/Español/हिन्दी/中文",
+    )
 
 
 class AudioRequest(SummarizeRequest):
-    voice_id: str = Field(
-        default="JBFqnCBsd6RMkjVDRZzb",
-        description="ElevenLabs voice ID (default: George — news anchor)",
+    tone: str = Field(
+        default="Analytical",
+        description="Voice tone: Analytical | Conversational | Energetic | Calm",
     )
-    model_id: str = Field(
-        default="eleven_multilingual_v2",
-        description="ElevenLabs TTS model ID",
-    )
+
+
+class VoiceSampleRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Short sample text to synthesize as-is (no LLM step)")
+    language: str = Field(default="English", description="Human language label, e.g. English/Español/हिन्दी/中文")
+    tone: str = Field(default="Analytical", description="Voice tone: Analytical | Conversational | Energetic | Calm")
 
 
 # ── Response Schemas ─────────────────────────────────────────────
@@ -73,6 +83,32 @@ class PreferenceChatResponse(BaseModel):
     reply: str
     preferences: dict | None = None
     complete: bool = False
+    error: str | None = None
+
+
+# ── Agent onboarding (per-agent topic lock-in) ───────────────────
+
+class AgentOnboardingChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(
+        default_factory=list,
+        description="Running conversation so far (empty to start the chat).",
+    )
+
+
+class AgentOnboardingLocked(BaseModel):
+    """The finalized research directive derived from the conversation."""
+    topic: str = Field(..., description="Short niche label, e.g. 'US stocks — rising trends'")
+    summary: str = Field(..., description="1-2 sentence plain-English description shown to the user")
+    core_prompt: str = Field(..., description="Detailed research directive stored as the agent's core role")
+    keywords: list[str] = Field(default_factory=list)
+    region: str = Field(default="Global")
+
+
+class AgentOnboardingChatResponse(BaseModel):
+    success: bool
+    reply: str
+    complete: bool = False
+    locked: AgentOnboardingLocked | None = None
     error: str | None = None
 
 

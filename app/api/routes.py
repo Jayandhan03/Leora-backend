@@ -4,12 +4,18 @@ All routes are prefixed with /api/v1 via the main router.
 """
 
 import logging
+from datetime import datetime, timezone
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.models.schemas import (
+    AgentOnboardingChatRequest,
+    AgentOnboardingChatResponse,
     AudioRequest,
+    DeliverNowAgentRequest,
     DeliverNowRequest,
     HealthResponse,
     NewsRequest,
@@ -20,12 +26,15 @@ from app.models.schemas import (
     ScoutsResponse,
     SummarizeRequest,
     SummarizeResponse,
+    VoiceSampleRequest,
 )
+from app.services.agent_chat_service import chat_agent_onboarding
 from app.services.audio_service import generate_audio_stream
+from app.services.db_service import agents_collection
 from app.services.llm_service import run_agent, summarize_news
 from app.services.news_service import fetch_news
 from app.services.preferences_chat_service import chat_preferences
-from app.services.scheduler_service import deliver_for_user, run_due_deliveries
+from app.services.scheduler_service import deliver_for_agent, deliver_for_user, run_due_deliveries
 from app.services.scouts_service import get_scout, list_scouts
 from app.services.telegram_service import send_audio_to_user
 
@@ -79,7 +88,7 @@ async def summarize_news_endpoint(data: SummarizeRequest):
             time_published=data.time_published,
         )
         articles = news_data.get("data", []) if news_data else []
-        summary = summarize_news(topic=data.topic, articles=articles)
+        summary = summarize_news(topic=data.topic, articles=articles, language=data.language)
         return SummarizeResponse(
             success=True,
             topic=data.topic,
@@ -113,7 +122,7 @@ async def news_audio_endpoint(data: AudioRequest):
         raise HTTPException(status_code=502, detail=f"News fetch failed: {e}")
 
     try:
-        script = summarize_news(topic=data.topic, articles=articles)
+        script = summarize_news(topic=data.topic, articles=articles, language=data.language)
     except Exception as e:
         logger.error("POST /audio/news summarize error: %s", e)
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
@@ -121,8 +130,8 @@ async def news_audio_endpoint(data: AudioRequest):
     try:
         audio_stream = generate_audio_stream(
             script=script,
-            voice_id=data.voice_id,
-            model_id=data.model_id,
+            language=data.language,
+            tone=data.tone,
         )
         filename = data.topic.replace(" ", "_")[:40] + "_news.mp3"
         return StreamingResponse(
@@ -139,6 +148,25 @@ async def news_audio_endpoint(data: AudioRequest):
     except Exception as e:
         logger.error("POST /audio/news TTS error: %s", e)
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {e}")
+
+
+@router.post(
+    "/audio/voice-sample",
+    tags=["Audio"],
+    summary="TTS-only sample of a language+tone combination (skips the news pipeline)",
+)
+async def voice_sample_endpoint(data: VoiceSampleRequest):
+    """Backs the create-agent page's 'Preview voice' button — synthesizes the
+    given text with the real language voice + tone prosody, so what a user
+    hears matches exactly what a real briefing would sound like."""
+    try:
+        audio_stream = generate_audio_stream(script=data.text, language=data.language, tone=data.tone)
+        return StreamingResponse(audio_stream, media_type="audio/mpeg")
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /audio/voice-sample error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Voice sample generation failed: {e}")
 
 
 # ── Telegram ─────────────────────────────────────────────────────
@@ -237,6 +265,26 @@ async def preferences_chat(data: PreferenceChatRequest):
         raise HTTPException(status_code=500, detail=f"Preference chat failed: {e}")
 
 
+# ── Agent onboarding (per-agent topic lock-in chat) ──────────────
+
+@router.post(
+    "/agents/onboarding-chat",
+    response_model=AgentOnboardingChatResponse,
+    tags=["Agents"],
+    summary="Grok-powered chat that locks in a single agent's core research role",
+)
+async def agent_onboarding_chat(data: AgentOnboardingChatRequest):
+    try:
+        messages = [m.model_dump() for m in data.messages]
+        result = chat_agent_onboarding(messages)
+        return AgentOnboardingChatResponse(success=True, **result)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /agents/onboarding-chat error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Agent onboarding chat failed: {e}")
+
+
 # ── Scheduler ────────────────────────────────────────────────────
 
 @router.post(
@@ -283,3 +331,48 @@ async def scheduler_run_due():
     except Exception as e:
         logger.error("POST /scheduler/run-due error: %s", e)
         raise HTTPException(status_code=500, detail=f"Scheduler run failed: {e}")
+
+
+# ── Agents (real, per-user, multi-agent) ──────────────────────────
+
+@router.post(
+    "/agents/deliver-now",
+    tags=["Scheduler"],
+    summary="Immediately generate and send one briefing for a specific agent",
+)
+async def agents_deliver_now(data: DeliverNowAgentRequest):
+    """
+    Send a single briefing right now for one deployed agent.
+    Backs the dashboard/create-agent 'run now' action.
+    """
+    try:
+        oid = ObjectId(data.agent_id)
+    except (InvalidId, ValueError) as ve:
+        raise HTTPException(status_code=422, detail=f"Invalid agent_id: {ve}")
+
+    agent = agents_collection().find_one({"_id": oid})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    try:
+        result = deliver_for_agent(agent)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /agents/deliver-now error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Delivery failed: {e}")
+
+    update: dict = {"$set": {"lastResult": result}}
+    if result.get("delivered"):
+        update["$set"]["schedule.lastSentAt"] = datetime.now(timezone.utc)
+        update["$set"]["stats.sourcesTracked"] = result.get("articles", 0)
+        update["$inc"] = {"stats.briefingsSent": 1}
+    agents_collection().update_one({"_id": oid}, update)
+
+    if not result.get("delivered"):
+        reason = result.get("reason", "unknown")
+        if reason == "no_telegram_link":
+            raise HTTPException(status_code=409, detail="Telegram is not linked for this user.")
+        raise HTTPException(status_code=500, detail=f"Delivery failed: {reason}")
+
+    return result

@@ -9,7 +9,7 @@ langchain_tavily
 langgraph
 
 # ── TTS ──
-gtts
+edge-tts
 
 # ── HTTP Client ──
 requests

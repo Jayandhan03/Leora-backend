@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     if settings.SCHEDULER_ENABLED and settings.MONGODB_URI:
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
-            from app.services.scheduler_service import run_due_deliveries
+            from app.services.scheduler_service import run_due_agent_deliveries, run_due_deliveries
 
             scheduler = BackgroundScheduler(timezone="UTC")
             scheduler.add_job(
@@ -36,6 +36,14 @@ async def lifespan(app: FastAPI):
                 trigger="interval",
                 seconds=settings.SCHEDULER_TICK_SECONDS,
                 id="deliver_due_briefings",
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                run_due_agent_deliveries,
+                trigger="interval",
+                seconds=settings.SCHEDULER_TICK_SECONDS,
+                id="deliver_due_agent_briefings",
                 max_instances=1,
                 coalesce=True,
             )
