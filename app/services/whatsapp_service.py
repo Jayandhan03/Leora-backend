@@ -7,10 +7,12 @@ handles outbound audio delivery.
 
 import io
 import logging
+from datetime import datetime, timedelta, timezone
 
 import requests
 
 from app.core.config import settings
+from app.services.db_service import get_gridfs, pending_whatsapp_deliveries_collection
 
 logger = logging.getLogger(__name__)
 
@@ -97,3 +99,113 @@ def send_audio_to_user(
     message_id = messages[0].get("id") if messages else None
     logger.info("Audio sent successfully to wa_id=%s", wa_id)
     return {"success": True, "message_id": message_id}
+
+
+def send_template_message(
+    wa_id: str,
+    template_name: str,
+    language_code: str,
+    body_params: list[str],
+    button_payload: str,
+    button_index: int = 0,
+) -> dict:
+    """
+    Send an approved template message with a single Quick Reply button.
+
+    Unlike send_audio_to_user, this can be sent outside the 24h session
+    window — it's the only thing WhatsApp allows for messages a business
+    initiates rather than replies to. `button_payload` is echoed back on the
+    inbound webhook event when the user taps the button, so it should encode
+    which pending delivery this ping is for.
+    """
+    if not settings.KAPSO_PHONE_NUMBER_ID or not settings.KAPSO_API_KEY:
+        raise ValueError("KAPSO_API_KEY / KAPSO_PHONE_NUMBER_ID is not configured.")
+
+    url = f"{KAPSO_BASE}/{settings.KAPSO_PHONE_NUMBER_ID}/messages"
+    headers = {"Content-Type": "application/json", "X-API-Key": settings.KAPSO_API_KEY}
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": wa_id,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": p} for p in body_params],
+                },
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": str(button_index),
+                    "parameters": [{"type": "payload", "payload": button_payload}],
+                },
+            ],
+        },
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    if not resp.ok:
+        logger.error("Kapso sendTemplate failed: %s %s", resp.status_code, resp.text[:300])
+        raise ValueError(f"Kapso API error ({resp.status_code}): {resp.text}")
+
+    result = resp.json()
+    messages = result.get("messages") or []
+    message_id = messages[0].get("id") if messages else None
+    logger.info("Template ping sent to wa_id=%s (template=%s)", wa_id, template_name)
+    return {"success": True, "message_id": message_id}
+
+
+def queue_whatsapp_delivery(
+    *,
+    email: str,
+    wa_id: str,
+    first_name: str,
+    label: str,
+    audio_bytes: bytes,
+    filename: str,
+    caption: str,
+    agent_id: str | None = None,
+) -> bool:
+    """
+    Hold a generated briefing until the user confirms they want it, since it
+    can't be sent directly outside the 24h session window: stores the audio
+    in GridFS, records a pending-delivery doc, and sends the approved
+    "briefing ready" template with a Quick Reply button. The webhook resolves
+    the tap back to this pending doc and triggers the real audio send.
+
+    Returns True if the ping was sent.
+    """
+    file_id = get_gridfs().put(audio_bytes, filename=filename, content_type="audio/mpeg")
+
+    now = datetime.now(timezone.utc)
+    doc = {
+        "email": email.lower(),
+        "waId": wa_id,
+        "agentId": agent_id,
+        "audioFileId": file_id,
+        "filename": filename,
+        "caption": caption,
+        "status": "pending",
+        "createdAt": now,
+        "expiresAt": now + timedelta(hours=settings.WHATSAPP_PENDING_TTL_HOURS),
+    }
+    inserted_id = pending_whatsapp_deliveries_collection().insert_one(doc).inserted_id
+
+    try:
+        send_template_message(
+            wa_id=wa_id,
+            template_name=settings.WHATSAPP_BRIEFING_TEMPLATE_NAME,
+            language_code=settings.WHATSAPP_BRIEFING_TEMPLATE_LANG,
+            body_params=[first_name, label],
+            button_payload=str(inserted_id),
+        )
+        return True
+    except Exception:
+        pending_whatsapp_deliveries_collection().update_one(
+            {"_id": inserted_id}, {"$set": {"status": "failed"}}
+        )
+        get_gridfs().delete(file_id)
+        raise

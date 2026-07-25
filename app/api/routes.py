@@ -18,6 +18,7 @@ from app.models.schemas import (
     AudioRequest,
     DeliverNowAgentRequest,
     DeliverNowRequest,
+    DeliverPendingWhatsAppRequest,
     HealthResponse,
     NewsRequest,
     NewsResponse,
@@ -28,16 +29,23 @@ from app.models.schemas import (
     SummarizeRequest,
     SummarizeResponse,
     VoiceSampleRequest,
+    WhatsAppTestPingRequest,
 )
 from app.services.agent_chat_service import chat_agent_onboarding
 from app.services.audio_service import generate_audio_stream
-from app.services.db_service import agents_collection
+from app.services.db_service import agents_collection, get_gridfs, pending_whatsapp_deliveries_collection
 from app.services.llm_service import run_agent, summarize_news
 from app.services.news_service import fetch_news
 from app.services.preferences_chat_service import chat_preferences
-from app.services.scheduler_service import deliver_for_agent, deliver_for_user, run_due_deliveries
+from app.services.scheduler_service import (
+    deliver_for_agent,
+    deliver_for_user,
+    run_due_deliveries,
+    send_whatsapp_test_ping,
+)
 from app.services.scouts_service import get_scout, list_scouts
 from app.services.telegram_service import send_audio_to_user
+from app.services.whatsapp_service import send_audio_to_user as send_whatsapp_audio
 
 logger = logging.getLogger(__name__)
 
@@ -383,3 +391,78 @@ async def agents_deliver_now(data: DeliverNowAgentRequest):
         raise HTTPException(status_code=500, detail=f"Delivery failed: {reason}")
 
     return result
+
+
+# ── WhatsApp (confirm-then-deliver) ───────────────────────────────
+# Internal endpoints called by the Next.js webhook — not exposed to the
+# frontend directly. Audio for a scheduled briefing is held in GridFS until
+# the user taps the "Send it" button on the approved template ping; these
+# routes reuse whatsapp_service.send_audio_to_user (the same code path the
+# scheduler used to call directly) once that confirmation arrives.
+
+@router.post(
+    "/whatsapp/deliver-pending",
+    tags=["WhatsApp"],
+    summary="Fulfill a pending WhatsApp delivery after the user taps the template button",
+)
+async def whatsapp_deliver_pending(data: DeliverPendingWhatsAppRequest):
+    logger.info("POST /whatsapp/deliver-pending received pending_id=%s", data.pending_id)
+
+    try:
+        oid = ObjectId(data.pending_id)
+    except (InvalidId, ValueError) as ve:
+        raise HTTPException(status_code=422, detail=f"Invalid pending_id: {ve}")
+
+    coll = pending_whatsapp_deliveries_collection()
+    doc = coll.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Pending delivery not found.")
+
+    if doc["status"] != "pending":
+        logger.info("Pending delivery %s already %s, skipping.", data.pending_id, doc["status"])
+        return {"success": False, "reason": f"already_{doc['status']}"}
+
+    if doc["expiresAt"] < datetime.now(timezone.utc):
+        coll.update_one({"_id": oid}, {"$set": {"status": "expired"}})
+        raise HTTPException(status_code=410, detail="This delivery has expired.")
+
+    audio_bytes = get_gridfs().get(doc["audioFileId"]).read()
+
+    try:
+        result = await asyncio.to_thread(
+            send_whatsapp_audio,
+            wa_id=doc["waId"],
+            audio_bytes=audio_bytes,
+            filename=doc.get("filename") or "briefing.mp3",
+            caption=doc.get("caption"),
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /whatsapp/deliver-pending error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Delivery failed: {e}")
+
+    coll.update_one(
+        {"_id": oid}, {"$set": {"status": "delivered", "deliveredAt": datetime.now(timezone.utc)}}
+    )
+    get_gridfs().delete(doc["audioFileId"])
+
+    logger.info("Pending delivery %s fulfilled, message_id=%s", data.pending_id, result.get("message_id"))
+    return {"success": True, "message_id": result.get("message_id")}
+
+
+@router.post(
+    "/whatsapp/test-ping",
+    tags=["WhatsApp"],
+    summary="Send a real template ping + queued test audio (backs the dashboard 'Send test message' button)",
+)
+async def whatsapp_test_ping(data: WhatsAppTestPingRequest):
+    try:
+        result = await asyncio.to_thread(send_whatsapp_test_ping, data.email)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /whatsapp/test-ping error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Test ping failed: {e}")
+
+    return {"success": True, **result}

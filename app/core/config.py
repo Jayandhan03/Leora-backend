@@ -34,6 +34,13 @@ class Settings:
     # --- WhatsApp (via Kapso) ---
     KAPSO_API_KEY: str = os.getenv("KAPSO_API_KEY", "")
     KAPSO_PHONE_NUMBER_ID: str = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
+    # Approved template used to ask permission before delivering a briefing
+    # outside the 24h session window (see whatsapp_service.send_template_message).
+    WHATSAPP_BRIEFING_TEMPLATE_NAME: str = os.getenv("WHATSAPP_BRIEFING_TEMPLATE_NAME", "briefing_ready")
+    WHATSAPP_BRIEFING_TEMPLATE_LANG: str = os.getenv("WHATSAPP_BRIEFING_TEMPLATE_LANG", "en_US")
+    # How long a queued briefing waits for the user to tap "Send it" before
+    # it's swept and marked expired.
+    WHATSAPP_PENDING_TTL_HOURS: int = int(os.getenv("WHATSAPP_PENDING_TTL_HOURS", "24"))
 
     # --- Database (shared with the YourNews Next.js app) ---
     MONGODB_URI: str = os.getenv("MONGODB_URI", "")

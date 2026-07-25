@@ -31,6 +31,14 @@ class DeliverNowAgentRequest(BaseModel):
     agent_id: str = Field(..., min_length=1, description="Mongo _id of the agent to deliver now")
 
 
+class DeliverPendingWhatsAppRequest(BaseModel):
+    pending_id: str = Field(..., min_length=1, description="Mongo _id of the PendingWhatsAppDelivery to fulfill")
+
+
+class WhatsAppTestPingRequest(BaseModel):
+    email: str = Field(..., min_length=3, description="Signed-in user's email whose linked WhatsApp to ping")
+
+
 class SummarizeRequest(BaseModel):
     topic: str = Field(..., min_length=1, description="Search topic")
     limit: int = Field(default=5, ge=1, le=20, description="Number of articles to fetch")
