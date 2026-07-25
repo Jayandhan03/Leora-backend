@@ -67,6 +67,13 @@ def pending_whatsapp_deliveries_collection() -> Collection:
     return get_db()["pendingwhatsappdeliveries"]
 
 
+def push_subscriptions_collection() -> Collection:
+    """FCM registration tokens — written by the Next.js app when a user
+    grants notification permission (web button click or native mobile
+    prompt), read here at push-send time. See push_service.py."""
+    return get_db()["pushsubscriptions"]
+
+
 def briefings_collection() -> Collection:
     """Permanent per-agent briefing history — audio metadata + transcript,
     one doc per generated briefing (see briefing_service.persist_briefing).

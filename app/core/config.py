@@ -42,6 +42,11 @@ class Settings:
     # it's swept and marked expired.
     WHATSAPP_PENDING_TTL_HOURS: int = int(os.getenv("WHATSAPP_PENDING_TTL_HOURS", "24"))
 
+    # --- Push notifications (Firebase Cloud Messaging) ---
+    # The whole service-account JSON as one env var, not a file path — keeps
+    # the secret out of any deployable artifact on the EC2 box.
+    FIREBASE_SERVICE_ACCOUNT_JSON: str = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+
     # --- Database (shared with the YourNews Next.js app) ---
     MONGODB_URI: str = os.getenv("MONGODB_URI", "")
     MONGODB_DB: str = os.getenv("MONGODB_DB", "yournews")

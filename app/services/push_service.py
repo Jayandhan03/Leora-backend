@@ -1,0 +1,70 @@
+"""
+Push notification service — sends an FCM notification to every device a
+user has registered (web browser or the Android app) when a new briefing is
+ready. One unified send path for both platforms: the web client and the
+Capacitor plugin both end up producing an FCM registration token, so the
+backend never needs to know which platform a given token came from.
+"""
+
+import json
+import logging
+
+import firebase_admin
+from firebase_admin import credentials, messaging
+
+from app.core.config import settings
+from app.services.db_service import push_subscriptions_collection
+
+logger = logging.getLogger(__name__)
+
+_app: firebase_admin.App | None = None
+
+
+def _get_app() -> firebase_admin.App:
+    global _app
+    if _app is None:
+        if not settings.FIREBASE_SERVICE_ACCOUNT_JSON:
+            raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON is not configured.")
+        cred = credentials.Certificate(json.loads(settings.FIREBASE_SERVICE_ACCOUNT_JSON))
+        _app = firebase_admin.initialize_app(cred)
+    return _app
+
+
+def send_push_for_briefing(*, email: str, agent_name: str, label: str, briefing_id: str, agent_id: str) -> dict:
+    """Notify every device registered for this email that a new briefing is
+    ready. Never raises on a partial/total send failure — the caller treats
+    this as best-effort and must not let it block the actual delivery."""
+    subs = list(push_subscriptions_collection().find({"email": email.lower(), "disabled": {"$ne": True}}))
+    if not subs:
+        return {"sent": 0}
+
+    tokens = [s["token"] for s in subs]
+    message = messaging.MulticastMessage(
+        notification=messaging.Notification(
+            title=agent_name,
+            body=f"New briefing: {label}",
+        ),
+        data={
+            "agentId": str(agent_id),
+            "briefingId": str(briefing_id),
+            "click_action": "/dashboard",
+        },
+        tokens=tokens,
+    )
+
+    response = messaging.send_each_for_multicast(message, app=_get_app())
+
+    # Self-heal: a token FCM reports UNREGISTERED is dead (app uninstalled,
+    # browser unsubscribed, token rotated) — without this, every future tick
+    # keeps sending to it forever.
+    for sub, result in zip(subs, response.responses):
+        if not result.success and result.exception is not None:
+            code = getattr(result.exception, "code", "")
+            if code == "UNREGISTERED":
+                push_subscriptions_collection().update_one({"_id": sub["_id"]}, {"$set": {"disabled": True}})
+
+    logger.info(
+        "Sent briefing push to %s: %d succeeded, %d failed.",
+        email, response.success_count, response.failure_count,
+    )
+    return {"sent": response.success_count, "failed": response.failure_count}

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.audio_service import generate_audio_stream
 from app.services.briefing_service import persist_briefing, set_briefing_channels
+from app.services.push_service import send_push_for_briefing
 from app.services.db_service import (
     agents_collection,
     get_chat_id_for_email,
@@ -240,6 +241,17 @@ def deliver_for_agent(agent: dict) -> dict:
         email, chat_id, wa_id, audio_bytes, filename, caption, label, agent_id=str(agent.get("_id"))
     )
     set_briefing_channels(briefing_id, channels)
+
+    try:
+        send_push_for_briefing(
+            email=email,
+            agent_name=agent.get("name") or "Agent",
+            label=label,
+            briefing_id=str(briefing_id),
+            agent_id=str(agent.get("_id")),
+        )
+    except Exception as exc:  # noqa: BLE001 — a push failure must never fail the delivery
+        logger.error("Push notification failed for %s: %s", email, exc)
 
     delivered = True  # reaching here means the briefing is at minimum saved to the in-app inbox
     logger.info("Delivered agent briefing to %s (%d articles) — channels=%s", email, len(articles), channels)

@@ -21,4 +21,7 @@ python-multipart
 pymongo[srv]
 
 # ── Scheduler ──
-apscheduler
+apscheduler
+
+# ── Push notifications ──
+firebase-admin
