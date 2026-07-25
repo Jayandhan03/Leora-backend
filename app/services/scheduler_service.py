@@ -16,16 +16,20 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.services.audio_service import generate_audio_stream
+from app.services.briefing_service import persist_briefing, set_briefing_channels
 from app.services.db_service import (
     agents_collection,
     get_chat_id_for_email,
+    get_first_name_for_email,
     get_wa_id_for_email,
+    get_gridfs,
+    pending_whatsapp_deliveries_collection,
     preferences_collection,
 )
 from app.services.llm_service import summarize_news
 from app.services.news_service import fetch_news
 from app.services.telegram_service import send_audio_to_user as send_telegram_audio
-from app.services.whatsapp_service import send_audio_to_user as send_whatsapp_audio
+from app.services.whatsapp_service import queue_whatsapp_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +97,18 @@ def _send_to_linked_channels(
     audio_bytes: bytes,
     filename: str,
     caption: str,
+    label: str,
+    agent_id: str | None = None,
 ) -> dict:
     """
     Send the generated audio to every channel the user has linked. A channel
     failing to send doesn't block the other — each is tried independently.
+
+    WhatsApp can't receive the audio directly here — Meta only allows
+    business-initiated messages outside the 24h session window if they're an
+    approved template. So instead of sending audio, this queues it (GridFS +
+    a pending-delivery record) and sends a template asking the user to tap a
+    button; the webhook delivers the actual audio once they do.
     """
     channels: dict = {}
 
@@ -110,7 +122,17 @@ def _send_to_linked_channels(
 
     if wa_id:
         try:
-            send_whatsapp_audio(wa_id=wa_id, audio_bytes=audio_bytes, filename=filename, caption=caption)
+            first_name = get_first_name_for_email(email)
+            queue_whatsapp_delivery(
+                email=email,
+                wa_id=wa_id,
+                first_name=first_name,
+                label=label,
+                audio_bytes=audio_bytes,
+                filename=filename,
+                caption=caption,
+                agent_id=agent_id,
+            )
             channels["whatsapp"] = True
         except Exception as exc:  # noqa: BLE001
             logger.error("WhatsApp delivery failed for %s: %s", email, exc)
@@ -156,7 +178,7 @@ def deliver_for_user(pref: dict) -> dict:
     filename = (label.replace(" ", "_").replace(",", "")[:40] or "news") + "_briefing.mp3"
     caption = f"🎙 Your scheduled briefing: {label}"
 
-    channels = _send_to_linked_channels(email, chat_id, wa_id, audio_bytes, filename, caption)
+    channels = _send_to_linked_channels(email, chat_id, wa_id, audio_bytes, filename, caption, label)
     delivered = any(channels.values())
     logger.info("Delivered scheduled briefing to %s (%d articles) — channels=%s", email, len(articles), channels)
     return {"email": email, "delivered": delivered, "articles": len(articles), "channels": channels}
@@ -164,9 +186,11 @@ def deliver_for_user(pref: dict) -> dict:
 
 def deliver_for_agent(agent: dict) -> dict:
     """
-    Run the full pipeline for a single per-user Agent document and send the
-    audio to every chat platform its owner has linked. Mirrors
-    deliver_for_user, but reads the nested Agent shape
+    Run the full pipeline for a single per-user Agent document: generate the
+    briefing, persist it permanently (GridFS + a briefings doc, so it's
+    playable in the dashboard regardless of whether any chat channel is
+    linked), and fan it out to every chat platform its owner has linked.
+    Mirrors deliver_for_user, but reads the nested Agent shape
     (topics/keywords/region/articleLimit/personality) instead of the flat
     legacy UserPreference shape.
     """
@@ -176,9 +200,6 @@ def deliver_for_agent(agent: dict) -> dict:
 
     chat_id = get_chat_id_for_email(email)
     wa_id = get_wa_id_for_email(email)
-    if not chat_id and not wa_id:
-        logger.info("Skipping agent %s (%s) — no delivery channel linked.", agent.get("_id"), email)
-        return {"email": email, "delivered": False, "reason": "no_channel_linked"}
 
     query = _build_query(agent)
     label = _topic_label(agent) or agent.get("name") or "Your News"
@@ -203,10 +224,84 @@ def deliver_for_agent(agent: dict) -> dict:
     filename = (label.replace(" ", "_").replace(",", "")[:40] or "news") + "_briefing.mp3"
     caption = f"🎙 {agent.get('name', 'Agent')}: {label}"
 
-    channels = _send_to_linked_channels(email, chat_id, wa_id, audio_bytes, filename, caption)
-    delivered = any(channels.values())
+    briefing_id = persist_briefing(
+        agent=agent,
+        email=email,
+        script=script,
+        audio_bytes=audio_bytes,
+        filename=filename,
+        label=label,
+        language=language,
+        tone=tone,
+        article_count=len(articles),
+    )
+
+    channels = _send_to_linked_channels(
+        email, chat_id, wa_id, audio_bytes, filename, caption, label, agent_id=str(agent.get("_id"))
+    )
+    set_briefing_channels(briefing_id, channels)
+
+    delivered = True  # reaching here means the briefing is at minimum saved to the in-app inbox
     logger.info("Delivered agent briefing to %s (%d articles) — channels=%s", email, len(articles), channels)
-    return {"email": email, "delivered": delivered, "articles": len(articles), "channels": channels}
+    return {
+        "email": email,
+        "delivered": delivered,
+        "articles": len(articles),
+        "channels": {"app": True, **channels},
+        "briefing_id": str(briefing_id),
+    }
+
+
+def send_whatsapp_test_ping(email: str) -> dict:
+    """
+    Exercise the real confirm-then-deliver flow end to end for the "Send test
+    message" button: synthesize a short line, queue it, and send the approved
+    template. Raises ValueError if WhatsApp isn't linked for this email.
+    """
+    wa_id = get_wa_id_for_email(email)
+    if not wa_id:
+        raise ValueError("WhatsApp is not connected for this account.")
+
+    first_name = get_first_name_for_email(email)
+    script = "This is a test of your Leora WhatsApp delivery. Everything is working."
+    audio_bytes = _drain_audio_stream(generate_audio_stream(script, language="English"))
+    if not audio_bytes:
+        raise ValueError("TTS produced no audio.")
+
+    queue_whatsapp_delivery(
+        email=email,
+        wa_id=wa_id,
+        first_name=first_name,
+        label="test",
+        audio_bytes=audio_bytes,
+        filename="leora_test.mp3",
+        caption="✅ Leora test successful! Your WhatsApp is connected.",
+    )
+    return {"email": email, "queued": True}
+
+
+# ── Pending WhatsApp deliveries ────────────────────────────────────
+
+def sweep_expired_whatsapp_deliveries() -> dict:
+    """
+    Drop pending WhatsApp deliveries nobody confirmed in time: free the held
+    GridFS audio and mark the record expired so a stray late tap resolves to
+    "not available" instead of silently trying to deliver something stale.
+    """
+    coll = pending_whatsapp_deliveries_collection()
+    now = datetime.now(timezone.utc)
+    expired = list(coll.find({"status": "pending", "expiresAt": {"$lt": now}}))
+
+    for doc in expired:
+        try:
+            get_gridfs().delete(doc["audioFileId"])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to delete expired WhatsApp audio %s: %s", doc.get("_id"), exc)
+        coll.update_one({"_id": doc["_id"]}, {"$set": {"status": "expired"}})
+
+    if expired:
+        logger.info("Expired %d unconfirmed WhatsApp deliveries.", len(expired))
+    return {"expired": len(expired)}
 
 
 # ── Scheduling ───────────────────────────────────────────────────
@@ -314,6 +409,8 @@ def run_due_agent_deliveries() -> dict:
     collection (multiple independently-scheduled agents per user) instead of
     the legacy single UserPreference document per user.
     """
+    sweep_expired_whatsapp_deliveries()
+
     coll = agents_collection()
     now = datetime.now(timezone.utc)
 

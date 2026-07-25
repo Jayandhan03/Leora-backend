@@ -11,6 +11,7 @@ Mongoose model pluralization used by the frontend:
 
 import logging
 
+import gridfs
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
@@ -58,6 +59,34 @@ def agents_collection() -> Collection:
     return get_db()["agents"]
 
 
+def users_collection() -> Collection:
+    return get_db()["users"]
+
+
+def pending_whatsapp_deliveries_collection() -> Collection:
+    return get_db()["pendingwhatsappdeliveries"]
+
+
+def briefings_collection() -> Collection:
+    """Permanent per-agent briefing history — audio metadata + transcript,
+    one doc per generated briefing (see briefing_service.persist_briefing).
+    Mirrored on the frontend by models/Briefing.ts."""
+    return get_db()["briefings"]
+
+
+def get_gridfs() -> gridfs.GridFS:
+    """GridFS bucket holding audio that's waiting on a WhatsApp button-tap
+    confirmation (see whatsapp_service.queue_whatsapp_delivery)."""
+    return gridfs.GridFS(get_db(), collection="whatsappAudio")
+
+
+def get_briefing_gridfs() -> gridfs.GridFS:
+    """GridFS bucket holding permanent briefing audio, read back out by the
+    Next.js dashboard for playback. Unlike get_gridfs()'s whatsappAudio
+    bucket, nothing here ever expires or gets deleted."""
+    return gridfs.GridFS(get_db(), collection="briefingAudio")
+
+
 def get_chat_id_for_email(email: str) -> str | None:
     """Look up the Telegram chat_id linked to a user's email, if any."""
     doc = telegram_links_collection().find_one({"email": email.lower()})
@@ -68,6 +97,15 @@ def get_wa_id_for_email(email: str) -> str | None:
     """Look up the WhatsApp wa_id linked to a user's email, if any."""
     doc = whatsapp_links_collection().find_one({"email": email.lower()})
     return doc.get("waId") if doc else None
+
+
+def get_first_name_for_email(email: str) -> str:
+    """First token of the user's display name, for template greetings. Falls
+    back to "there" if the user record or name is missing."""
+    doc = users_collection().find_one({"email": email.lower()})
+    name = (doc.get("name") if doc else "") or ""
+    first = name.strip().split(" ")[0]
+    return first or "there"
 
 
 def is_available() -> bool:
