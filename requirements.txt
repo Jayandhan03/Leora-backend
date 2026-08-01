@@ -24,4 +24,4 @@ pymongo[srv]
 apscheduler
 
 # ── Push notifications ──
-firebase-admin
+firebase-admin

@@ -39,6 +39,10 @@ class WhatsAppTestPingRequest(BaseModel):
     email: str = Field(..., min_length=3, description="Signed-in user's email whose linked WhatsApp to ping")
 
 
+class PushTestRequest(BaseModel):
+    email: str = Field(..., min_length=3, description="Signed-in user's email whose devices to send a test push to")
+
+
 class SummarizeRequest(BaseModel):
     topic: str = Field(..., min_length=1, description="Search topic")
     limit: int = Field(default=5, ge=1, le=20, description="Number of articles to fetch")

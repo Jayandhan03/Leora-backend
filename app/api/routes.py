@@ -24,6 +24,7 @@ from app.models.schemas import (
     NewsResponse,
     PreferenceChatRequest,
     PreferenceChatResponse,
+    PushTestRequest,
     ScoutResponse,
     ScoutsResponse,
     SummarizeRequest,
@@ -37,6 +38,7 @@ from app.services.db_service import agents_collection, get_gridfs, pending_whats
 from app.services.llm_service import run_agent, summarize_news
 from app.services.news_service import fetch_news
 from app.services.preferences_chat_service import chat_preferences
+from app.services.push_service import send_test_push
 from app.services.scheduler_service import (
     deliver_for_agent,
     deliver_for_user,
@@ -464,5 +466,22 @@ async def whatsapp_test_ping(data: WhatsAppTestPingRequest):
     except Exception as e:
         logger.error("POST /whatsapp/test-ping error: %s", e)
         raise HTTPException(status_code=500, detail=f"Test ping failed: {e}")
+
+    return {"success": True, **result}
+
+
+@router.post(
+    "/push/test",
+    tags=["Push"],
+    summary="Send a test in-app push notification (backs the delivery page's 'Send test notification' button)",
+)
+async def push_test(data: PushTestRequest):
+    try:
+        result = await asyncio.to_thread(send_test_push, data.email)
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.error("POST /push/test error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Test push failed: {e}")
 
     return {"success": True, **result}

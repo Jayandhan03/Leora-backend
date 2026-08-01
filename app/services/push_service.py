@@ -30,25 +30,18 @@ def _get_app() -> firebase_admin.App:
     return _app
 
 
-def send_push_for_briefing(*, email: str, agent_name: str, label: str, briefing_id: str, agent_id: str) -> dict:
-    """Notify every device registered for this email that a new briefing is
-    ready. Never raises on a partial/total send failure — the caller treats
-    this as best-effort and must not let it block the actual delivery."""
+def _send_to_active_devices(*, email: str, title: str, body: str, data: dict) -> dict:
+    """Shared send path: look up this email's non-disabled subscriptions,
+    multicast the notification, and self-heal any tokens FCM reports as
+    dead. Used by both the real briefing push and the manual test push."""
     subs = list(push_subscriptions_collection().find({"email": email.lower(), "disabled": {"$ne": True}}))
     if not subs:
-        return {"sent": 0}
+        return {"sent": 0, "failed": 0}
 
     tokens = [s["token"] for s in subs]
     message = messaging.MulticastMessage(
-        notification=messaging.Notification(
-            title=agent_name,
-            body=f"New briefing: {label}",
-        ),
-        data={
-            "agentId": str(agent_id),
-            "briefingId": str(briefing_id),
-            "click_action": "/dashboard",
-        },
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
         tokens=tokens,
     )
 
@@ -63,8 +56,42 @@ def send_push_for_briefing(*, email: str, agent_name: str, label: str, briefing_
             if code == "UNREGISTERED":
                 push_subscriptions_collection().update_one({"_id": sub["_id"]}, {"$set": {"disabled": True}})
 
+    return {"sent": response.success_count, "failed": response.failure_count}
+
+
+def send_push_for_briefing(*, email: str, agent_name: str, label: str, briefing_id: str, agent_id: str) -> dict:
+    """Notify every device registered for this email that a new briefing is
+    ready. Never raises on a partial/total send failure — the caller treats
+    this as best-effort and must not let it block the actual delivery."""
+    result = _send_to_active_devices(
+        email=email,
+        title=agent_name,
+        body=f"New briefing: {label}",
+        data={"agentId": str(agent_id), "briefingId": str(briefing_id), "click_action": "/dashboard"},
+    )
     logger.info(
         "Sent briefing push to %s: %d succeeded, %d failed.",
-        email, response.success_count, response.failure_count,
+        email, result["sent"], result.get("failed", 0),
     )
-    return {"sent": response.success_count, "failed": response.failure_count}
+    return result
+
+
+def send_test_push(email: str) -> dict:
+    """Back the delivery page's "Send test notification" button. Raises
+    ValueError if the user has no active (enabled, non-disabled) device
+    to send to, so the route can report a clear 422 instead of a silent
+    "sent to nobody"."""
+    has_active = push_subscriptions_collection().count_documents(
+        {"email": email.lower(), "disabled": {"$ne": True}}
+    ) > 0
+    if not has_active:
+        raise ValueError("No devices have in-app notifications enabled for this account.")
+
+    result = _send_to_active_devices(
+        email=email,
+        title="Leora",
+        body="✅ Test successful — in-app notifications are working.",
+        data={"click_action": "/dashboard"},
+    )
+    logger.info("Sent test push to %s: %d succeeded, %d failed.", email, result["sent"], result.get("failed", 0))
+    return result
